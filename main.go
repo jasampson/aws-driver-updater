@@ -165,7 +165,7 @@ func main() {
 		{
 			name:                     "nvme",
 			downloadUrl:              "https://s3.amazonaws.com/ec2-windows-drivers-downloads/NVMe/Latest/AWSNVMe.zip",
-			installedVersionCheckCmd: "(Get-WmiObject Win32_PnPSignedDriver | ? {$_.Description -match 'Standard NVM Express Controller' -or $_.Description -match 'AWS NVMe Elastic Block Storage Adapter'}).DriverVersion",
+			installedVersionCheckCmd: "if ((Get-WmiObject Win32_PnPSignedDriver).Description -match 'Standard NVM Express Controller' -ne $null) {Write-Host '1.0.0'} else {(Get-WmiObject Win32_PnPSignedDriver | ? {$_.Description -eq 'AWS NVMe Elastic Block Storage Adapter'}).DriverVersion}",
 			installCmd:               `powershell.exe -NoProfile -File AWSNVMe\install.ps1 -NoReboot`,
 			latestVersion:            "",
 			verCheckUrl:              "https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/aws-nvme-drivers.html",

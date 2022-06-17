@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -133,22 +134,70 @@ func getLatestVersion(url, regexPattern string) string {
 	return matches[len(matches)-1]
 }
 
-func amAdmin() bool {
+func isAdmin() bool {
 	_, err := os.Open("\\\\.\\PHYSICALDRIVE0")
 	return err == nil
 }
 
+func getEC2InstanceType() string {
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+	}
+
+	// Make request to EC2 instance metadata service
+	var url string = "http://169.254.169.254/latest/meta-data/instance-type"
+	response, err := client.Get(url)
+	if err != nil {
+		return "error"
+	}
+	defer response.Body.Close()
+
+	// Get the response body as a string
+	dataInBytes, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return "error"
+	}
+
+	// yes, this is a simplistic check and it's possible if something responds at url above we could get a false positive
+	if len(dataInBytes) > 0 {
+		return strings.ToLower(strings.TrimSpace(string(dataInBytes)))
+	} else {
+		return "error"
+	}
+}
+
 func main() {
-	// run some checks before doing anything
+	// run preliminary checks
 	if runtime.GOOS != "windows" {
-		fmt.Println("This program only works with Windows.")
+		fmt.Println("This program only works with Windows. Exiting.")
 		os.Exit(1)
 	}
-	if !amAdmin() {
+	if !isAdmin() {
 		fmt.Println("You must run this program as administrator.  Exiting.")
 		os.Exit(1)
 	}
+	var instanceType string = getEC2InstanceType()
+	if instanceType == "error" {
+		fmt.Println("This program only works on AWS EC2 instances.  Exiting.")
+		os.Exit(1)
+	} else {
+		fmt.Println(instanceType, "EC2 instance type detected.")
+	}
 
+	// help text goes here
+	const usage = `Usage of test_program:
+	-h, --help    displays this help message
+	-i,           install all available driver updates.  by default this program only checks if updates are available.
+`
+
+	// parse command line args
+	var install bool
+	flag.BoolVar(&install, "i", false, "Install all available updates.")
+	flag.Usage = func() { fmt.Print(usage) }
+	flag.Parse()
+
+	// define aws driver struct values array.  update values below as needed.
 	type aws_driver struct {
 		name                     string
 		downloadUrl              string
@@ -160,12 +209,11 @@ func main() {
 		needsUpdate              bool
 	}
 
-	// aws driver struct values array.  set these.
 	var aws_drivers = []aws_driver{
 		{
 			name:                     "nvme",
 			downloadUrl:              "https://s3.amazonaws.com/ec2-windows-drivers-downloads/NVMe/Latest/AWSNVMe.zip",
-			installedVersionCheckCmd: "if ((Get-WmiObject Win32_PnPSignedDriver).Description -match 'Standard NVM Express Controller' -ne $null) {Write-Host '1.0.0'} else {(Get-WmiObject Win32_PnPSignedDriver | ? {$_.Description -match 'AWS NVMe Elastic Block Storage Adapter'}).DriverVersion}",
+			installedVersionCheckCmd: "$driver_ver = (Get-WmiObject Win32_PnPSignedDriver | ? {$_.Description -match 'AWS NVMe Elastic Block Storage Adapter'}).DriverVersion; if ($driver_ver) {Write-Host $($driver_ver)} else {Write-Host '1.0.0'}",
 			installCmd:               `powershell.exe -NoProfile -File AWSNVMe\install.ps1 -NoReboot`,
 			latestVersion:            "",
 			verCheckUrl:              "https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/aws-nvme-drivers.html",
@@ -194,6 +242,7 @@ func main() {
 		},
 	}
 
+	// run functions in parallel
 	var wg sync.WaitGroup
 
 	fmt.Printf("Checking AWS website for latest driver versions.. ")
@@ -215,17 +264,46 @@ func main() {
 		go func(i int, driver aws_driver) {
 			defer wg.Done()
 
+			// certain driver types have specific instance type requirements, which we account for here
+			var driverVersionCheckEarlyExit bool = false
+			switch driver.name {
+			case "ena":
+				/* ena is only supported on specific instance types outlined here: https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/enhanced-networking-ena.html
+				   make sure these are all entered in lowercase */
+				var enaInvalidInstanceTypesPrefix = []string{"c4", "d2", "t2"}
+				var enaInvalidInstanceTypes = []string{"m4.large", "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge"}
+				instancePrefix := strings.Split(instanceType, ".")[0]
+				if slices.Contains(enaInvalidInstanceTypes, instanceType) || slices.Contains(enaInvalidInstanceTypesPrefix, instancePrefix) {
+					driverVersionCheckEarlyExit = true
+				}
+			case "nvme":
+				/* nvme is only supported on nitro systems outlined here https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/instance-types.html#ec2-nitro-instances
+				   make sure these are all entered in lowercase */
+				var nvmeValidInstanceTypesPrefix = []string{"c5", "c5a", "c5ad", "c5d", "c5n", "c6a", "c6i", "c6id", "d3", "d3en", "g4", "g4ad", "g5", "i3en", "i4i", "m5", "m5a", "m5ad", "m5d", "m5dn", "m5n", "m5zn", "m6a", "m6i", "m6id", "r5", "r5a", "r5ad", "r5b", "r5d", "r5dn", "r5n", "r6i", "r6id", "t3", "t3a", "x2idn", "x2iedn", "x2iezn", "z1d"}
+				var nvmeValidInstanceTypes = []string{"p3dn.24xlarge", "u-12tb1.112xlarge", "u-3tb1.56xlarge", "u-6tb1.112xlarge", "u-6tb1.56xlarge", "u-9tb1.112xlarge"}
+				instancePrefix := strings.Split(instanceType, ".")[0]
+				if slices.Contains(nvmeValidInstanceTypes, instanceType) || slices.Contains(nvmeValidInstanceTypesPrefix, instancePrefix) {
+					driverVersionCheckEarlyExit = false
+				} else {
+					driverVersionCheckEarlyExit = true
+				}
+			}
+			// exit early if driver version check fails based on the driver and EC2 instance type
+			if driverVersionCheckEarlyExit {
+				fmt.Printf("%-4s | %-9s | %-9s | not supported on %s instance type\n", driver.name, "none", "none", instanceType)
+				return
+			}
+
+			// retrieve driver version using powershell commands defined above
 			cmdArgs := []string{"-NoProfile", "-Command", driver.installedVersionCheckCmd}
 			cmdOut, err := exec.Command("powershell.exe", cmdArgs...).CombinedOutput()
 			if err != nil {
 				fmt.Println(err)
 			}
-			// clean up output from powershell and trim extra stuff off the end
 			cmdOutClean := strings.TrimSpace(string(cmdOut))
 			if len(cmdOutClean) == 0 {
 				log.Fatal(driver.name, " driver version not returned")
 			}
-
 			/*
 				clean up anything beyond 3 subversions mainly for display purposes
 				the AWS website does versions like this: 1.4.0
@@ -235,7 +313,7 @@ func main() {
 			cmdOutCleanSplit := strings.Split(cmdOutClean, ".")
 			cmdOutCleaner := cmdOutCleanSplit[0] + "." + cmdOutCleanSplit[1] + "." + cmdOutCleanSplit[2]
 
-			// perform version comparison
+			// perform version comparison and set needsUpdate appropriately
 			v1, err := version.NewVersion(driver.latestVersion)
 			if err != nil {
 				log.Fatal(err)
@@ -253,23 +331,27 @@ func main() {
 			} else {
 				needsUpdate = "no"
 			}
+
 			fmt.Printf("%-4s | %-9s | %-9s | %s\n", driver.name, cmdOutCleaner, driver.latestVersion, needsUpdate)
 		}(i, driver)
 	}
 	wg.Wait()
 
-	// exit if no updates are needed
-	var exitNow bool = true
+	// only continue if -install arg was passed and updatesNeeded = true
+	var updatesNeeded bool = false
 	for _, driver := range aws_drivers {
 		if driver.needsUpdate {
-			exitNow = false
+			updatesNeeded = true
 		}
 	}
-	if exitNow {
-		fmt.Println("All AWS driver versions are up to date.  Exiting.")
+	if !updatesNeeded {
+		fmt.Println("AWS driver versions are up to date.  Exiting.")
 		os.Exit(0)
+	} else if updatesNeeded && install {
+		fmt.Println("AWS Driver updates are needed.  Beginning installation.")
 	} else {
-		fmt.Println("Driver updates are needed.")
+		fmt.Println("AWS Driver updates are needed but -i was not passed.  Exiting.")
+		os.Exit(0)
 	}
 
 	wg.Add(len(aws_drivers))

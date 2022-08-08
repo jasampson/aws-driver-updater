@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +20,9 @@ import (
 	"github.com/hashicorp/go-version"
 	"golang.org/x/exp/slices"
 )
+
+// used for --version arg, this gets set with linker flags from the build command
+var programVersion = "1.0.0"
 
 func unzipSource(source, destination string) error {
 	// 1. Open the zip file
@@ -107,7 +109,7 @@ func getLatestVersion(url, regexPattern string) string {
 
 	// Copy data from the response to standard output
 	// Get the response body as a string
-	dataInBytes, err := ioutil.ReadAll(response.Body)
+	dataInBytes, err := io.ReadAll(response.Body)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -154,7 +156,7 @@ func getEC2InstanceType() string {
 	defer response.Body.Close()
 
 	// Get the response body as a string
-	dataInBytes, err := ioutil.ReadAll(response.Body)
+	dataInBytes, err := io.ReadAll(response.Body)
 	if err != nil {
 		return "error"
 	}
@@ -168,6 +170,26 @@ func getEC2InstanceType() string {
 }
 
 func main() {
+	// help text goes here
+	const usage = `Usage of test_program:
+	-h, --help    			displays this help message
+	-v, --version		 	display version information
+	-i,           			install all available driver updates.  by default this program only checks if updates are available.
+`
+
+	// parse command line args
+	var install, displayversion bool
+	flag.BoolVar(&install, "i", false, "Install all available updates.")
+	flag.BoolVar(&displayversion, "v", false, "Display version information.")
+	flag.Usage = func() { fmt.Print(usage) }
+	flag.Parse()
+
+	// display version information and exit
+	if displayversion {
+		fmt.Println("Version:\t", programVersion)
+		os.Exit(0)
+	}
+
 	// run preliminary checks
 	if runtime.GOOS != "windows" {
 		fmt.Println("This program only works with Windows. Exiting.")
@@ -184,18 +206,6 @@ func main() {
 	} else {
 		fmt.Println(instanceType, "EC2 instance type detected.")
 	}
-
-	// help text goes here
-	const usage = `Usage of test_program:
-	-h, --help    displays this help message
-	-i,           install all available driver updates.  by default this program only checks if updates are available.
-`
-
-	// parse command line args
-	var install bool
-	flag.BoolVar(&install, "i", false, "Install all available updates.")
-	flag.Usage = func() { fmt.Print(usage) }
-	flag.Parse()
 
 	// define aws driver struct values array.  update values below as needed.
 	type aws_driver struct {

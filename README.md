@@ -1,4 +1,4 @@
-# aws-updater-go
+# aws-driver-updater
 
 This project contains source and binary written in Go to update AWS PV, ENA and NVME Windows drivers on AWS EC2 instances automatically.
 
